@@ -1,0 +1,107 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FarmTG Auto Verify</title>
+<style>
+  body { font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f4f4f5; }
+  .box { background: #fff; border-radius: 16px; padding: 32px; box-shadow: 0 4px 24px rgba(0,0,0,.1); text-align: center; min-width: 320px; }
+  h2 { margin: 0 0 8px; font-size: 18px; color: #111; }
+  p  { margin: 0 0 20px; font-size: 14px; color: #666; }
+  #status { margin-top: 16px; font-size: 13px; color: #555; min-height: 20px; }
+  #status.ok  { color: #16a34a; font-weight: 600; }
+  #status.err { color: #dc2626; }
+</style>
+
+<div class="box">
+  <h2>FarmTG 人机验证</h2>
+  <p>页面加载后会自动完成验证，通常无需点击。</p>
+  <div id="widget"></div>
+  <div id="status">正在加载验证组件…</div>
+</div>
+
+<script>
+const SITEKEY = "0x4AAAAAADmotcK0lqq38R89";
+const CAPTURE_URL = "http://127.0.0.1:17771/submit";
+const STATUS = document.getElementById("status");
+
+function setStatus(msg, cls) {
+  STATUS.textContent = msg;
+  STATUS.className = cls || "";
+}
+
+async function getJwt() {
+  // Read JWT from query param ?jwt=xxx or prompt
+  const params = new URLSearchParams(location.search);
+  const jwt = params.get("jwt");
+  if (jwt) return jwt;
+  const input = prompt("请粘贴 JWT token（.farmtg_jwt 文件内容）：");
+  if (!input) throw new Error("未提供 JWT");
+  return input.trim();
+}
+
+async function exchangeToken(captchaToken, jwt) {
+  const res = await fetch("https://farmtg.top/api/game/human-verify", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ captcha_token: captchaToken }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  const hp = data.human_pass;
+  if (!hp) throw new Error("响应中无 human_pass");
+  return { hp, expiresIn: data.expires_in };
+}
+
+async function submitToCapture(data) {
+  await fetch(CAPTURE_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ payload: JSON.stringify(data) }),
+  });
+}
+
+async function run() {
+  try {
+    const jwt = await getJwt();
+
+    // Load Turnstile
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onTurnstileLoad";
+      s.onerror = () => reject(new Error("Turnstile 脚本加载失败"));
+      document.head.appendChild(s);
+      window.onTurnstileLoad = resolve;
+    });
+
+    setStatus("验证组件已加载，正在等待验证…");
+
+    const captchaToken = await new Promise((resolve, reject) => {
+      window.turnstile.render("#widget", {
+        sitekey: SITEKEY,
+        theme: "light",
+        callback: resolve,
+        "error-callback": () => reject(new Error("验证失败")),
+        "expired-callback": () => reject(new Error("验证已过期，请刷新重试")),
+        "timeout-callback": () => reject(new Error("验证超时，请刷新重试")),
+      });
+    });
+
+    setStatus("验证通过，正在换取 human_pass…");
+    const { hp, expiresIn } = await exchangeToken(captchaToken, jwt);
+
+    setStatus("正在写入本地文件…");
+    try {
+      await submitToCapture({ human_pass: hp, expires_in: expiresIn });
+      setStatus(`✅ 完成！human_pass 已写入，有效期 ${expiresIn} 秒`, "ok");
+    } catch {
+      setStatus(`✅ human_pass: ${hp.slice(0, 16)}…（本地服务未运行，请手动保存）`, "ok");
+    }
+  } catch (e) {
+    setStatus(`❌ ${e.message}`, "err");
+  }
+}
+
+run();
+</script>

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Process *)",
+      "PowerShell(\\(Get-CimInstance Win32_Process -Filter \"ProcessId=17100\"\\).CommandLine)",
+      "PowerShell($env:FARMTG_SSH_PASSWORD_B64)",
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(Start-Process -FilePath \"node\" -ArgumentList \"auto-loop-remote-full.mjs\" -WorkingDirectory \"C:\\\\Users\\\\benny\\\\Documents\\\\Codex\\\\2026-06-19\\\\66-154-109-189-root-71ob44ls5y\" -RedirectStandardOutput \"C:\\\\Users\\\\benny\\\\Documents\\\\Codex\\\\2026-06-19\\\\66-154-109-189-root-71ob44ls5y\\\\farmtg-local-run.out.log\" -RedirectStandardError \"C:\\\\Users\\\\benny\\\\Documents\\\\Codex\\\\2026-06-19\\\\66-154-109-189-root-71ob44ls5y\\\\farmtg-local-run.err.log\" -PassThru | Select-Object Id, ProcessName, StartTime)",
+      "PowerShell(\\(Get-Command node -ErrorAction SilentlyContinue\\).Source)"
+    ]
+  }
+}

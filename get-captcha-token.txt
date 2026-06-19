@@ -1,0 +1,26 @@
+(async () => {
+  if (!window.turnstile) {
+    await new Promise((r, j) => {
+      const s = document.createElement("script");
+      s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+      s.onload = r;
+      s.onerror = () => j(new Error("load failed"));
+      document.head.appendChild(s);
+    });
+  }
+  const token = await new Promise((resolve, reject) => {
+    const o = document.createElement("div");
+    o.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)";
+    const b = document.createElement("div");
+    b.style.cssText = "background:#fff;border-radius:14px;padding:16px;min-width:280px;display:flex;flex-direction:column;gap:10px;align-items:center";
+    const w = document.createElement("div");
+    b.append(w); o.append(b); document.body.append(o);
+    window.turnstile.render(w, {
+      sitekey: "0x4AAAAAADmotcK0lqq38R89",
+      theme: "light",
+      callback: (t) => { o.remove(); resolve(t); },
+      "error-callback": () => { o.remove(); reject(new Error("error")); }
+    });
+  });
+  prompt("复制 captcha_token（全选 Ctrl+C，动作要快，2分钟内有效）：", token);
+})();

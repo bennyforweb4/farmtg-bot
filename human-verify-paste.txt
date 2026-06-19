@@ -1,0 +1,41 @@
+(async () => {
+  const SITE_KEY = "0x4AAAAAADmotcK0lqq38R89";
+  const CAPTURE_URL = "http://127.0.0.1:17771/submit";
+
+  function findJwt(v) {
+    if (typeof v === "string") return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v) ? v : "";
+    if (!v || typeof v !== "object") return "";
+    for (const c of Object.values(v)) { const f = findJwt(c); if (f) return f; }
+    return "";
+  }
+  function findHumanPass(v) {
+    if (!v || typeof v !== "object") return "";
+    if (typeof v.human_pass === "string") return v.human_pass;
+    for (const c of Object.values(v)) { const f = findHumanPass(c); if (f) return f; }
+    return "";
+  }
+  if (!/farmtg\.top$/i.test(location.hostname)) throw new Error("请在 farmtg.top 的 frame 里运行");
+  const initData = window.Telegram?.WebApp?.initData || "";
+  if (!initData) throw new Error("找不到 Telegram initData，请从 Telegram 打开游戏");
+  const loginRes = await fetch("/api/auth/login", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({init_data:initData}) });
+  const loginJson = await loginRes.json().catch(()=>({}));
+  if (!loginRes.ok) throw new Error("login failed: " + JSON.stringify(loginJson));
+  const jwt = findJwt(loginJson);
+  if (!jwt) throw new Error("JWT not found");
+  if (!window.turnstile) { await new Promise((r,j)=>{ const s=document.createElement("script"); s.src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"; s.onload=r; s.onerror=()=>j(new Error("load failed")); document.head.appendChild(s); }); }
+  const captchaToken = await new Promise((resolve, reject) => {
+    const o=document.createElement("div"); o.style.cssText="position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)";
+    const b=document.createElement("div"); b.style.cssText="background:#fff;border-radius:14px;padding:16px;min-width:280px;display:flex;flex-direction:column;gap:10px;align-items:center";
+    const w=document.createElement("div");
+    b.append(w); o.append(b); document.body.append(o);
+    window.turnstile.render(w,{sitekey:SITE_KEY,theme:"light",callback:(t)=>{o.remove();resolve(t);},"error-callback":()=>{o.remove();reject(new Error("turnstile error"))}});
+  });
+  const vr = await fetch("/api/game/human-verify", { method:"POST", headers:{authorization:`Bearer ${jwt}`,"content-type":"application/json"}, body:JSON.stringify({captcha_token:captchaToken}) });
+  const vj = await vr.json().catch(()=>({}));
+  if (!vr.ok) throw new Error("human-verify failed: " + JSON.stringify(vj));
+  const hp = findHumanPass(vj);
+  if (!hp) throw new Error("human_pass not found: " + JSON.stringify(vj));
+  await fetch(CAPTURE_URL, { method:"POST", headers:{"content-type":"application/x-www-form-urlencoded"}, body:new URLSearchParams({payload:JSON.stringify(vj)}) });
+  console.log("✅ Done! human_pass:", hp);
+  alert("验证完成！");
+})();

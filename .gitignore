@@ -1,0 +1,39 @@
+# Secrets & tokens
+.farmtg_jwt
+.farmtg_human_pass
+.farmtg_captcha_token
+.capsolver_key
+farmtg-local/farmtg/.farmtg_jwt
+farmtg-local/farmtg/.farmtg_human_pass
+farmtg-local/farmtg/.farmtg_captcha_token
+farmtg-local/farmtg/.capsolver_key
+
+# Telethon session
+*.session
+*.session-journal
+
+# State files (runtime, not code)
+.daily_state.json
+.challenge_state.json
+farmtg-local/farmtg/.daily_state.json
+farmtg-local/farmtg/.challenge_state.json
+
+# Logs
+*.log
+*.out.log
+*.err.log
+
+# Node
+node_modules/
+farmtg-local/farmtg/node_modules/
+
+# Backups
+*.bak
+*.bak-*
+*.before-*
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
