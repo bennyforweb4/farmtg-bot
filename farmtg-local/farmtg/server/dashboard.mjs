@@ -1,5 +1,11 @@
 import { createServer } from "node:http";
 import { exec } from "node:child_process";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dir = dirname(fileURLToPath(import.meta.url));
+const JWT_FILE = join(__dir, "..", ".farmtg_jwt");
 
 const PORT = 7788;
 
@@ -91,6 +97,42 @@ export function startDashboard() {
       return;
     }
 
+    if (path === "/api/jwt" && req.method === "POST") {
+      let body = "";
+      req.on("data", d => (body += d));
+      req.on("end", () => {
+        try {
+          const { jwt } = JSON.parse(body);
+          if (!jwt || jwt.split(".").length !== 3) {
+            res.writeHead(400, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+            res.end('{"ok":false,"error":"无效的 JWT 格式"}');
+            return;
+          }
+          writeFileSync(JWT_FILE, jwt.trim());
+          pushLog("[jwt] ✅ JWT 已更新，bot 将在下次循环自动使用新 token");
+          res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+          res.end('{"ok":true}');
+        } catch (e) {
+          res.writeHead(500, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (path === "/api/jwt" && req.method === "GET") {
+      let preview = "";
+      try {
+        const raw = readFileSync(JWT_FILE, "utf8").trim();
+        const payload = JSON.parse(Buffer.from(raw.split(".")[1], "base64url").toString());
+        const exp = new Date(payload.exp * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+        preview = `有效期至 ${exp}`;
+      } catch { preview = "读取失败"; }
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ ok: true, preview }));
+      return;
+    }
+
     if (path === "/" || path === "/index.html") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(HTML);
@@ -100,8 +142,10 @@ export function startDashboard() {
     res.writeHead(404); res.end("not found");
   });
 
-  server.listen(PORT, () => {
-    exec(`start http://localhost:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    if (process.platform === "win32") {
+      exec(`start http://localhost:${PORT}`);
+    }
   });
 
   return { pushStatus, pushLog, getToken };
@@ -206,6 +250,18 @@ tbody tr.cur td{color:#3fb950;font-weight:600}
 </div>
 
 <div class="card-full">
+  <h2>JWT 令牌</h2>
+  <div style="display:flex;flex-direction:column;gap:8px">
+    <div style="font-size:12px;color:#8b949e" id="jwt-info">加载中…</div>
+    <div style="display:flex;gap:8px">
+      <input id="jwt-inp" placeholder="粘贴新的 JWT token（eyJ…）" style="flex:1;background:#161b22;border:1px solid #30363d;border-radius:5px;color:#e6edf3;padding:7px 10px;font-size:13px;outline:none;font-family:monospace">
+      <button onclick="submitJwt()" style="background:#1f6feb;border:none;border-radius:5px;color:#fff;padding:7px 16px;cursor:pointer;font-size:13px;white-space:nowrap">更新</button>
+    </div>
+    <div id="jwt-msg" style="font-size:12px;min-height:18px"></div>
+  </div>
+</div>
+
+<div class="card-full">
   <h2>实时日志</h2>
   <div id="logbox"></div>
 </div>
@@ -216,6 +272,19 @@ const logbox = document.getElementById("logbox");
 const cfArea = document.getElementById("cf-area");
 const vmsg  = document.getElementById("vmsg");
 let tsId = null, challengeOn = false;
+let nextTickAt = 0, countdownTimer = null;
+
+function startCountdown(intervalMs) {
+  if (countdownTimer) clearInterval(countdownTimer);
+  nextTickAt = Date.now() + intervalMs;
+  const el = document.getElementById("s-interval");
+  countdownTimer = setInterval(() => {
+    const rem = nextTickAt - Date.now();
+    if (rem <= 0) { el.textContent = "0s"; clearInterval(countdownTimer); return; }
+    const s = Math.round(rem / 1000);
+    el.textContent = s >= 60 ? Math.floor(s / 60) + "m " + (s % 60) + "s" : s + "s";
+  }, 500);
+}
 
 const es = new EventSource("/events");
 es.onopen  = () => setBadge(false);
@@ -244,7 +313,7 @@ function onStatus(s) {
   if (s.exp   != null) document.getElementById("s-exp").textContent       = fmt(s.exp);
   if (s.loopNum != null) document.getElementById("s-loop").textContent    = "#" + s.loopNum;
   if (s.crop)           document.getElementById("s-crop").textContent     = s.crop;
-  if (s.nextIntervalMs != null) document.getElementById("s-interval").textContent = fmtMs(s.nextIntervalMs);
+  if (s.nextIntervalMs != null) startCountdown(s.nextIntervalMs);
 
   const isChallenge = Boolean(s.challenge);
   setBadge(isChallenge);
@@ -316,6 +385,31 @@ function addLog(line) {
   while (logbox.children.length > 200) logbox.removeChild(logbox.firstChild);
   logbox.scrollTop = logbox.scrollHeight;
 }
+
+function submitJwt() {
+  const jwt = document.getElementById("jwt-inp").value.trim();
+  const msg = document.getElementById("jwt-msg");
+  if (!jwt || jwt.split(".").length !== 3) {
+    msg.style.color = "#f85149"; msg.textContent = "❌ 格式不对，JWT 应为 eyJ… 三段式"; return;
+  }
+  fetch("/api/jwt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jwt }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) {
+        msg.style.color = "#3fb950"; msg.textContent = "✅ 已保存，bot 下次循环自动生效";
+        document.getElementById("jwt-inp").value = "";
+        loadJwtInfo();
+      } else {
+        msg.style.color = "#f85149"; msg.textContent = "❌ " + (d.error || "保存失败");
+      }
+    }).catch(() => { msg.style.color = "#f85149"; msg.textContent = "❌ 请求失败"; });
+}
+
+function loadJwtInfo() {
+  fetch("/api/jwt").then(r => r.json()).then(d => {
+    document.getElementById("jwt-info").textContent = d.preview || "";
+  }).catch(() => {});
+}
+loadJwtInfo();
 
 window.onTurnstileLoad = () => {
   window.__tsLoaded = true;
