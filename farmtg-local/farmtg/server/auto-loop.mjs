@@ -12,11 +12,18 @@
  */
 
 import { spawn, execSync } from "node:child_process";
-import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync, appendFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { FarmtgClient } from "./farmtg-client.mjs";
 import { startDashboard } from "./dashboard.mjs";
+
+// 直接写文件日志，绕过 stdout 缓冲（后台运行时 Node.js 不会自动刷新）
+const _LOG_DIR  = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "logs");
+const _LOG_FILE = join(_LOG_DIR, "farmtg-out.log");
+const _ERR_FILE = join(_LOG_DIR, "farmtg-error.log");
+try { mkdirSync(_LOG_DIR, { recursive: true }); } catch {}
+function _fileLog(file, line) { try { appendFileSync(file, line + "\n", "utf8"); } catch {} }
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dir, "..");
@@ -60,9 +67,9 @@ const { pushStatus, pushLog, getToken: getDashboardToken } = startDashboard();
   const L = console.log.bind(console);
   const W = console.warn.bind(console);
   const E = console.error.bind(console);
-  console.log   = (...a) => { const s = a.join(" "); L(s);  pushLog(s); };
-  console.warn  = (...a) => { const s = a.join(" "); W(s);  pushLog(s); };
-  console.error = (...a) => { const s = a.join(" "); E(s);  pushLog(s); };
+  console.log   = (...a) => { const s = a.join(" "); L(s);  _fileLog(_LOG_FILE, s); pushLog(s); };
+  console.warn  = (...a) => { const s = a.join(" "); W(s);  _fileLog(_ERR_FILE, s); pushLog(s); };
+  console.error = (...a) => { const s = a.join(" "); E(s);  _fileLog(_ERR_FILE, s); pushLog(s); };
 }
 
 const CHALLENGE_BASE_MS = 10 * 60 * 1000;
@@ -427,20 +434,31 @@ function buildHeaders(jwt) {
   return headers;
 }
 
+const API_TIMEOUT_MS = 15_000;
+
 async function apiGet(path, jwt) {
-  const res = await fetch(`${GAME_ORIGIN}${path}`, { headers: buildHeaders(jwt) });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, data: tryJson(text) };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${GAME_ORIGIN}${path}`, { headers: buildHeaders(jwt), signal: ctrl.signal });
+    const text = await res.text();
+    return { ok: res.ok, status: res.status, data: tryJson(text) };
+  } finally { clearTimeout(timer); }
 }
 
 async function apiPost(path, jwt, body = {}) {
-  const res = await fetch(`${GAME_ORIGIN}${path}`, {
-    method: "POST",
-    headers: buildHeaders(jwt),
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, data: tryJson(text) };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${GAME_ORIGIN}${path}`, {
+      method: "POST",
+      headers: buildHeaders(jwt),
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    return { ok: res.ok, status: res.status, data: tryJson(text) };
+  } finally { clearTimeout(timer); }
 }
 
 function tryJson(text) {
@@ -538,91 +556,10 @@ async function cleanOwnMarks(jwt) {
 // --- Daily: steal crops + put marks ------------------------------------------
 
 async function dailyRoutine(jwt) {
-  console.log("[daily] ??????...");
-  const state = loadDailyState();
-  const today = new Date().toISOString().slice(0, 10);
-  if (state.date !== today) {
-    state.date = today;
-    state.visited = [];
-  }
-
-  // 1. Get players — prefer friends, then random
-  const playersRes = await apiGet("/api/game/all-players?page=1&page_size=50", jwt);
-  const players = playersRes.data?.data ?? [];
-  const friends = players.filter((p) => p.is_friend);
-  const others = players.filter((p) => !p.is_friend);
-  const candidates = [...friends, ...others];
-
-  let weedPut = 0, pestPut = 0, stealOk = 0, paidVisits = 0;
-
-  for (const player of candidates) {
-    if (weedPut >= 5 && pestPut >= 5 && stealOk >= 10) break;
-
-    const key = player.player_key;
-    const alreadyVisited = state.visited.includes(key);
-
-    // Visit if non-friend and not yet visited today
-    if (!player.is_friend && !alreadyVisited) {
-      if (paidVisits >= MAX_PAID_VISITS) continue;
-      const vr = await apiPost("/api/game/visit", jwt, { target_key: key });
-      if (!vr.ok) continue;
-      paidVisits++;
-      state.visited.push(key);
-      saveDailyState(state);
-      console.log(`  [visit] ?? ${player.first_name},?? ${vr.data?.charged_coins ?? 1000} ??`);
-    }
-
-    // Get their farm plots
-    const farmRes = await apiGet(`/api/game/friend-farm?target_key=${encodeURIComponent(key)}`, jwt);
-    const farmPlots = farmRes.data?.plots ?? [];
-    const activePlots = farmPlots.filter((p) => p.stage !== "empty" && p.stage !== "cleared");
-
-    // Put marks on growth/mature plots (mark_type: "weeds" | "worm")
-    const growingPlots = activePlots.filter((p) => p.stage === "growth" || p.stage === "mature");
-    for (const plot of growingPlots.slice(0, 2)) {
-      if (weedPut < 5) {
-        const mr = await apiPost("/api/game/friend-farm/mark", jwt, {
-          target_key: key, plot_index: plot.plot_index, mark_type: "weeds",
-        });
-        if (mr.ok && mr.data?.ok !== false) { weedPut++; }
-      }
-      if (pestPut < 5) {
-        const mr = await apiPost("/api/game/friend-farm/mark", jwt, {
-          target_key: key, plot_index: plot.plot_index, mark_type: "worm",
-        });
-        if (mr.ok && mr.data?.ok !== false) { pestPut++; }
-      }
-    }
-
-    // Help clear their clearable marks
-    const clearable = farmRes.data?.friend_marks_clearable ?? {};
-    for (const [, marks] of Object.entries(clearable)) {
-      for (const markType of (Array.isArray(marks) ? marks : [marks])) {
-        await apiPost("/api/game/friend-farm/clean", jwt, {
-          target_key: key, clean_type: markType,
-        }).catch(() => {});
-      }
-    }
-
-    // Steal crops
-    const sr = await apiPost("/api/game/steal-crops", jwt, { target_key: key });
-    if (sr.data?.ok && sr.data?.stolen?.length > 0) {
-      stealOk++;
-      const crops = sr.data.stolen.map((s) => `${s.crop_name}×${s.count}`).join(", ");
-      console.log(`  [steal] ??: ${crops} ? ${player.first_name}`);
-    } else if (sr.data?.pet_blocked) {
-      // skip silently
-    }
-  }
-
-  // 2. Clean own marks
+  // 只清理自己农场的杂草/虫卵，领取已完成任务
   await cleanOwnMarks(jwt);
-
-  // 3. Claim tasks that completed from daily activities
   const tc = await claimTasks(jwt);
-  if (tc > 0) console.log(`  [daily] ?? ${tc} ?????`);
-
-  console.log(`[daily] ??: ?×${weedPut} ?×${pestPut} ?=${stealOk} ????=${paidVisits}`);
+  if (tc > 0) console.log(`  [daily] 领取 ${tc} 个任务奖励`);
 }
 
 function plotCropId(plot) {
@@ -746,9 +683,7 @@ async function tick(client, jwt, loopNum) {
     .map((id) => `${CROP_NAMES[id]}×${seeds[id]?.count ?? 0}`)
     .filter((s) => !s.endsWith("×0"))
     .join(" ") || "???";
-  if (harvested > 0 || planted > 0 || loopNum % 10 === 0) {
-    console.log(`[tick ${loopNum}] lv=${u.level} exp=${u.exp} coins=${u.coins} | ??=${harvested} ??=${planted}(${lastCropId ? CROP_NAMES[lastCropId] : "-"}) | ${seedCounts} | ${elapsed}ms`);
-  }
+  console.log(`[tick ${loopNum}] lv=${u.level} coins=${u.coins} | 收=${harvested} 种=${planted}(${lastCropId ? CROP_NAMES[lastCropId] : "-"}) | ${seedCounts} | ${elapsed}ms`);
 
   const nextMs = chooseNextLoopInterval(plantedCropIds, client);
   pushStatus({
