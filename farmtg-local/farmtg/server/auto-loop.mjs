@@ -16,6 +16,7 @@ import { readFileSync, existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { FarmtgClient } from "./farmtg-client.mjs";
+import { startDashboard } from "./dashboard.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dir, "..");
@@ -27,28 +28,42 @@ const CAPTCHA_TOKEN_FILE = join(ROOT, ".farmtg_captcha_token");
 const CAPSOLVER_KEY_FILE = join(ROOT, ".capsolver_key");
 const GAME_ORIGIN = "https://farmtg.top";
 
+const CROP_GINGER  = "6a0191d87bcc1d7f9f9b3ea9";  // 王英俊家的姜 (480s, 35400 coins/hr)
 const CROP_GARLIC  = "6a018d007bcc1d7f9f9b3bda";  // 大蒜 (120s, 12000 coins/hr)
 const CROP_RADISH  = "69f85a3a2c24a6892a6110bf";  // 白萝卜 (60s, 6000 coins/hr)
 const CROP_CABBAGE = "69f862b32c24a6892a6110d0";  // 新手白菜 (60s, 3000 coins/hr)
 
-// 优先级：大蒜 > 白萝卜 > 白菜（按库存顺序降级）
-const CROP_PRIORITY = [CROP_GARLIC, CROP_RADISH, CROP_CABBAGE];
+// 优先级：姜 > 大蒜 > 白萝卜 > 白菜（按收益降级）
+const CROP_PRIORITY = [CROP_GINGER, CROP_GARLIC, CROP_RADISH, CROP_CABBAGE];
 
 const CROP_NAMES = {
+  [CROP_GINGER]:  "王英俊家的姜",
   [CROP_GARLIC]:  "大蒜",
   [CROP_RADISH]:  "白萝卜",
   [CROP_CABBAGE]: "新手白菜",
 };
 
 const CROP_INTERVAL_MS = {
+  [CROP_GINGER]:  482_000,
   [CROP_GARLIC]:  122_000,
   [CROP_RADISH]:   62_000,
   [CROP_CABBAGE]: 302_000,
 };
 
-const DEFAULT_LOOP_INTERVAL_MS = CROP_INTERVAL_MS[CROP_GARLIC];
+const DEFAULT_LOOP_INTERVAL_MS = CROP_INTERVAL_MS[CROP_GINGER];
 const DAILY_EVERY_LOOPS = 3;       // run daily routine every 3 loops
 const MAX_PAID_VISITS   = 3;       // max paid visits per daily run (3000 coins/day)
+
+// ─── Dashboard ───────────────────────────────────────────────────────────────
+const { pushStatus, pushLog, getToken: getDashboardToken } = startDashboard();
+{
+  const L = console.log.bind(console);
+  const W = console.warn.bind(console);
+  const E = console.error.bind(console);
+  console.log   = (...a) => { const s = a.join(" "); L(s);  pushLog(s); };
+  console.warn  = (...a) => { const s = a.join(" "); W(s);  pushLog(s); };
+  console.error = (...a) => { const s = a.join(" "); E(s);  pushLog(s); };
+}
 
 const CHALLENGE_BASE_MS = 10 * 60 * 1000;
 const CHALLENGE_MAX_MS = 60 * 60 * 1000;
@@ -232,7 +247,7 @@ async function getCapsolverToken() {
 }
 
 async function tryAutoVerify(jwt) {
-  let token = readCaptchaToken();
+  let token = getDashboardToken() || readCaptchaToken();
   if (!token) token = await getCapsolverToken();
   if (!token) return false;
   return await requestHumanPass(jwt, token);
@@ -659,15 +674,15 @@ async function tick(client, jwt, loopNum) {
   const findSeed = (cropId) => inv.find((i) => i.crop_id === cropId);
   const seeds = Object.fromEntries(CROP_PRIORITY.map((id) => [id, findSeed(id)]));
 
-  // Auto-buy garlic seeds when running low
-  const garlicCount = seeds[CROP_GARLIC]?.count ?? 0;
+  // Auto-buy 王英俊家的姜 seeds when running low
+  const gingerCount = seeds[CROP_GINGER]?.count ?? 0;
   const userCoins = client.state.user?.coins ?? 0;
-  if (garlicCount < 500 && userCoins > 50000) {
+  if (gingerCount < 100 && userCoins > 50000) {
     try {
-      const br = await client.action("buy_seed", { crop_id: CROP_GARLIC, count: 2000 });
+      const br = await client.action("buy_seed", { crop_id: CROP_GINGER, count: 500 });
       if (br?.ok) {
-        console.log(`  [buy] 大蒜种子×${br.data?.bought_count} 剩余金币=${br.data?.remaining_coins}`);
-        if (seeds[CROP_GARLIC]) seeds[CROP_GARLIC].count += br.data?.bought_count ?? 2000;
+        console.log(`  [buy] 王英俊家的姜×${br.data?.bought_count} 剩余金币=${br.data?.remaining_coins}`);
+        if (seeds[CROP_GINGER]) seeds[CROP_GINGER].count += br.data?.bought_count ?? 500;
       }
     } catch (e) {
       console.warn(`  [buy] 买种子失败: ${e.message}`);
@@ -710,7 +725,17 @@ async function tick(client, jwt, loopNum) {
     console.log(`[tick ${loopNum}] lv=${u.level} exp=${u.exp} coins=${u.coins} | ??=${harvested} ??=${planted}(${lastCropId ? CROP_NAMES[lastCropId] : "-"}) | ${seedCounts} | ${elapsed}ms`);
   }
 
-  return chooseNextLoopInterval(plantedCropIds, client);
+  const nextMs = chooseNextLoopInterval(plantedCropIds, client);
+  pushStatus({
+    lv: u.level,
+    exp: u.exp,
+    coins: u.coins,
+    loopNum,
+    crop: lastCropId ? CROP_NAMES[lastCropId] : "-",
+    nextIntervalMs: nextMs,
+    challenge: false,
+  });
+  return nextMs;
 }
 
 // --- Main --------------------------------------------------------------------
@@ -825,6 +850,7 @@ while (running) {
       if (ok) {
         console.log(`[challenge] loop ${loopNum}: 自动完成验证，恢复运行`);
         challengeState = clearChallengeState();
+        pushStatus({ challenge: false, verifyMsg: "✅ 验证完成，bot 已恢复运行" });
         client?.close();
         client = await connectClient(jwt);
         nextLoopIntervalMs = 60_000;
@@ -832,6 +858,7 @@ while (running) {
         challengeState = applyChallengeFailure(challengeState, err, loopNum);
         console.error(`[challenge] loop ${loopNum}: ${err.message}`);
         console.error(`[challenge] 请在浏览器完成人机验证后，写入 ${HUMAN_PASS_FILE} 或设置 FARMTG_HUMAN_PASS 并重启进程`);
+        pushStatus({ challenge: true, challengeMsg: `Cloudflare 验证触发（第 ${loopNum} 次循环），请在页面完成验证` });
         client?.close();
         client = null;
         nextLoopIntervalMs = 60_000;
