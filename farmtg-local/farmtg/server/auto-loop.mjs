@@ -12,7 +12,7 @@
  */
 
 import { spawn, execSync } from "node:child_process";
-import { readFileSync, existsSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { FarmtgClient } from "./farmtg-client.mjs";
@@ -89,6 +89,10 @@ function readHumanPass() {
   } catch {}
 
   return "";
+}
+
+function humanPassAgeMs() {
+  try { return Date.now() - statSync(HUMAN_PASS_FILE).mtimeMs; } catch { return Infinity; }
 }
 
 function parseCaptchaToken(raw) {
@@ -788,7 +792,10 @@ async function connectClientWithRetry() {
   while (running) {
     try {
       jwt = await ensureJwt(jwt);
-      await tryAutoVerify(jwt);
+      // Only proactively verify if there's an active challenge pause or no human_pass on file
+      if (challengeState.challengePauseUntil > Date.now() || !readHumanPass()) {
+        await tryAutoVerify(jwt);
+      }
       return await connectClient(jwt);
     } catch (err) {
       attempt++;
@@ -809,6 +816,7 @@ async function connectClientWithRetry() {
 }
 
 client = await connectClientWithRetry();
+challengeState = clearChallengeState();
 const u0 = client.state.user ?? {};
 console.log(`[connected] lv=${u0.level} exp=${u0.exp} coins=${u0.coins} plots=${u0.unlocked_plots}`);
 
@@ -878,6 +886,8 @@ while (running) {
       console.error(`[error] loop ${loopNum}: ${err.message}`);
       client?.close();
       client = null;
+      // Refresh human_pass if stale (valid for 900s, refresh at 750s)
+      if (humanPassAgeMs() > 750_000) await tryAutoVerify(jwt);
       try { client = await connectClient(jwt); } catch (e2) { console.error("[reconnect failed]", e2.message); }
       challengeState = clearChallengeState();
       nextLoopIntervalMs = 60_000;
