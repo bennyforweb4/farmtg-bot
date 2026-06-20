@@ -219,13 +219,23 @@ async function requestHumanPass(jwt, captchaToken) {
 
   const expireText = Number.isFinite(Number(data?.expires_in)) ? `${data.expires_in} 秒` : "?";
   console.log(`[challenge] 成功更新人机凭证 ${humanPass.slice(0, 8)}…（剩余 ${expireText}）`);
+  capsolverLastAttemptMs = 0; // reset cooldown so next challenge gets a fresh token promptly
   return true;
 }
+
+let capsolverLastAttemptMs = 0;
+const CAPSOLVER_COOLDOWN_MS = 5 * 60_000; // 5 min between CapSolver calls to avoid waste when server is down
 
 async function getCapsolverToken() {
   if (!existsSync(CAPSOLVER_KEY_FILE)) return "";
   const apiKey = readFileSync(CAPSOLVER_KEY_FILE, "utf8").trim();
   if (!apiKey) return "";
+  const sinceLast = Date.now() - capsolverLastAttemptMs;
+  if (sinceLast < CAPSOLVER_COOLDOWN_MS) {
+    console.log(`[capsolver] 冷却中（已过 ${Math.round(sinceLast / 1000)}s / 300s），跳过`);
+    return "";
+  }
+  capsolverLastAttemptMs = Date.now();
   try {
     console.log("[capsolver] 正在获取 Turnstile token…");
     const createRes = await fetch("https://api.capsolver.com/createTask", {
