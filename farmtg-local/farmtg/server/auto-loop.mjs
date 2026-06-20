@@ -177,7 +177,18 @@ function isInvalidCaptchaResponse(data) {
 async function requestHumanPass(jwt, captchaToken) {
   if (!captchaToken) return false;
 
-  const res = await apiPost(HUMAN_VERIFY_PATH, jwt, { captcha_token: captchaToken });
+  // 兑换时不带旧 X-Human-Pass，避免过期 pass 导致服务器拒绝 captcha_token
+  const headers = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${jwt}`,
+    "Origin": GAME_ORIGIN,
+    "Referer": GAME_ORIGIN + "/",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36",
+  };
+  const rawRes = await fetch(`${GAME_ORIGIN}${HUMAN_VERIFY_PATH}`, {
+    method: "POST", headers, body: JSON.stringify({ captcha_token: captchaToken }),
+  });
+  const res = { ok: rawRes.ok, status: rawRes.status, data: tryJson(await rawRes.text()) };
   if (!res.ok) {
     const detail = tryJsonText(res.data) || String(res.data || "");
     console.warn(`[challenge] 人机验证码兑换失败: ${detail}`);
