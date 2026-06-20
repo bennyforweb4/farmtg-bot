@@ -792,8 +792,8 @@ async function connectClientWithRetry() {
   while (running) {
     try {
       jwt = await ensureJwt(jwt);
-      // Only proactively verify if there's an active challenge pause or no human_pass on file
-      if (challengeState.challengePauseUntil > Date.now() || !readHumanPass()) {
+      // Proactively verify if: active challenge pause, no human_pass, or human_pass stale (>750s)
+      if (challengeState.challengePauseUntil > Date.now() || !readHumanPass() || humanPassAgeMs() > 750_000) {
         await tryAutoVerify(jwt);
       }
       return await connectClient(jwt);
